@@ -163,6 +163,7 @@ class FlashClient {
     private sessionId: number
     classClients: FlashClient[]
     private lastStatus: Packet
+	private lastSession: Packet
     private pending: boolean
     public dev_class: number
     public device: JDDevice
@@ -189,6 +190,7 @@ class FlashClient {
 
     private handlePacket(pkt: Packet) {
         if (pkt.serviceCommand == BootloaderCmd.PageData) this.lastStatus = pkt
+		if (pkt.serviceCommand == BootloaderCmd.SetSession) this.lastSession = pkt // CHANGED, added this
     }
 
     private start() {
@@ -226,14 +228,14 @@ class FlashClient {
         for (let i = 0; i < BL_RETRIES; ++i) {
             for (const d of this.classClients) {
                 if (d.pending) {
-                    if (
-                        d.lastStatus &&
-                        d.lastStatus.getNumber(NumberFormat.UInt32LE, 0) ==
-                            this.sessionId
-                    ) {
+					console.log(d.lastSession)
+					if (d.lastSession) {
+						console.log(d.lastSession.getNumber(NumberFormat.UInt32LE, 0));
+					}
+                    if (d.lastSession && d.lastSession.getNumber(NumberFormat.UInt32LE, 0) == this.sessionId) {
                         d.pending = false
                     } else {
-                        d.lastStatus = null
+                        d.lastSession = null
                         log(`set session ${this.sessionId} on ${d.device}`)
                         await d.sendCommandAsync(setsession)
                     }
@@ -241,7 +243,8 @@ class FlashClient {
                 }
             }
             if (this.numPending() == 0) break
-            await this.waitForStatusAsync()
+			console.log("wait");
+            await this.waitForStatusAsyncSession()
         }
 
         if (this.numPending()) throw new Error("Can't set session id")
@@ -258,6 +261,7 @@ class FlashClient {
         for (const c of this.classClients) {
             c.pending = true
             c.lastStatus = null
+			c.lastSession = null
         }
     }
 
@@ -268,9 +272,16 @@ class FlashClient {
     }
 
     private async waitForStatusAsync() {
-        for (let i = 0; i < 100; ++i) {
+		for (let i = 0; i < 100; ++i) {
             if (this.classClients.every(c => c.lastStatus != null)) break
             await this.bus.delay(5)
+        }
+    }
+
+	private async waitForStatusAsyncSession() {
+		for (let i = 0; i < 1000; ++i) { // CHANGED to 1000 -> erase page lasts max 85 ms so give the mcu some more time
+            if (this.classClients.every(c => c.lastSession != null)) break
+            await this.bus.delay(10)
         }
     }
 
@@ -287,7 +298,7 @@ class FlashClient {
         )
 
         if (page.data.length != this.pageSize)
-            throw new Error("invalid page size")
+            throw new Error("invalid page size: " + page.data.length + " - " + this.pageSize)
 
         for (const f of this.classClients) f.lastStatus = null
 
@@ -342,9 +353,7 @@ class FlashClient {
                 if (f.pending) {
                     let err = ""
                     if (f.lastStatus) {
-                        const [session_id, page_error, pageAddrR] = jdunpack<
-                            [number, BootloaderError, number]
-                        >(f.lastStatus.data, "u32 u32 u32")
+                        const [session_id, page_error, pageAddrR] = jdunpack<[number, BootloaderError, number]>(f.lastStatus.data, "u32 u32 u32")
                         if (session_id != this.sessionId)
                             err = "invalid session_id"
                         else if (pageAddrR != pageAddr)
@@ -359,6 +368,7 @@ class FlashClient {
                     if (err) {
                         f.lastStatus = null
                         log(`retry ${f.device}: ${err}`)
+						
                     } else {
                         f.pending = false
                     }
@@ -379,6 +389,7 @@ class FlashClient {
     }
 
     public async flashFirmwareBlob(fw: FirmwareBlob) {
+		console.log("flashFirmwareBlob")
         const waitCycles = 15
         this.progressTotal = fw.pages.length + waitCycles + 3
         this.progressIndex = 0
@@ -390,13 +401,16 @@ class FlashClient {
             this.updater.emit(CHANGE)
             prog()
             await this.startFlashAsync()
-            prog()
+            prog()			
             for (const page of fw.pages) {
+				console.log("flashing page:")
+				console.log(page)
                 await this.flashPage(page)
                 prog()
             }
         } finally {
             try {
+				console.log("end of flashing")
                 // even if something failed, try to reset everyone
                 await this.endFlashAsync()
                 prog()
@@ -458,7 +472,7 @@ export function parseUF2Firmware(
                 pages: [],
                 productIdentifier: familyID,
                 version: "",
-                pageSize: 1024,
+                pageSize: 4096,
                 name: "FW " + familyID.toString(16),
                 store,
             }
